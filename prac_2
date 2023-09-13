@@ -1,0 +1,197 @@
+
+import torch
+import os
+import torch.nn as nn
+from torch.utils.data import Subset
+import torch.optim as optim
+from torchvision.utils import save_image
+from torchvision.datasets import CelebA
+from torch.utils.data import DataLoader
+import torchvision.transforms as transforms
+
+transform = transforms.Compose([
+        transforms.Resize(64),
+        transforms.CenterCrop(64),
+        transforms.ToTensor(),
+        transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
+    ])
+
+celeba_dataset = CelebA(
+    root='./data',            # Root directory to save the dataset
+    download=True,             # Automatically download the dataset if not already downloaded
+    transform = transform
+)
+
+dataloader = DataLoader(celeba_dataset, batch_size=64, shuffle=True)
+
+class Generator(nn.Module):
+    def __init__(self, latent_dim):
+        super(Generator, self).__init__()
+        self.model = nn.Sequential(
+            # Your provided generator architecture here
+            nn.ConvTranspose2d(latent_dim, 512, kernel_size=4, stride=1, padding=0, bias=False),
+            nn.BatchNorm2d(512),
+            nn.ReLU(True),
+            # 512 x 4 x 4
+
+            nn.ConvTranspose2d(512, 256, kernel_size=4, stride=2, padding=1, bias=False),
+            nn.BatchNorm2d(256),
+            nn.ReLU(True),
+            # 256 x 8 x 8
+
+            nn.ConvTranspose2d(256, 128, kernel_size=4, stride=2, padding=1, bias=False),
+            nn.BatchNorm2d(128),
+            nn.ReLU(True),
+            # 128 x 16 x 16
+
+            nn.ConvTranspose2d(128, 64, kernel_size=4, stride=2, padding=1, bias=False),
+            nn.BatchNorm2d(64),
+            nn.ReLU(True),
+            # 64 x 32 x 32
+
+            nn.ConvTranspose2d(64, 3, kernel_size=4, stride=2, padding=1, bias=False),
+            nn.Tanh()
+            # 3 x 64 x 64
+        )
+
+    def forward(self, z):
+        img = self.model(z)
+        return img
+
+class Discriminator(nn.Module):
+    def __init__(self):
+        super(Discriminator, self).__init__()
+        self.model = nn.Sequential(
+            # Your provided discriminator architecture here
+            nn.Conv2d(3, 64, kernel_size=4, stride=2, padding=1, bias=False),
+            nn.BatchNorm2d(64),
+            nn.LeakyReLU(0.2, inplace=True),
+            # 64 x 32 x 32
+
+            nn.Conv2d(64, 128, kernel_size=4, stride=2, padding=1, bias=False),
+            nn.BatchNorm2d(128),
+            nn.LeakyReLU(0.2, inplace=True),
+            # 128 x 16 x 16
+
+            nn.Conv2d(128, 256, kernel_size=4, stride=2, padding=1, bias=False),
+            nn.BatchNorm2d(256),
+            nn.LeakyReLU(0.2, inplace=True),
+            # 256 x 8 x 8
+
+            nn.Conv2d(256, 512, kernel_size=4, stride=2, padding=1, bias=False),
+            nn.BatchNorm2d(512),
+            nn.LeakyReLU(0.2, inplace=True),
+            # 512 x 4 x 4
+
+            nn.Conv2d(512, 1, kernel_size=4, stride=1, padding=0, bias=False),
+            # 1 x 1 x 1
+
+            nn.Flatten(),
+            nn.Sigmoid()
+        )
+
+    def forward(self, img):
+        validity = self.model(img)
+        return validity
+
+# Hyperparameters
+latent_dim = 128
+batch_size = 64
+num_epochs = 10
+
+# Check if GPU is available and set the device accordingly
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+# Create the generator, discriminator, loss, and optimizers and move them to the GPU
+generator = Generator(latent_dim).to(device)
+discriminator = Discriminator().to(device)
+adversarial_loss = nn.BCELoss()
+optimizer_G = optim.Adam(generator.parameters(), lr=0.0002, betas=(0.5, 0.999))
+optimizer_D = optim.Adam(discriminator.parameters(), lr=0.0002, betas=(0.5, 0.999))
+
+# Lists to store losses
+generator_losses = []
+discriminator_losses = []
+
+# Training loop
+for epoch in range(num_epochs):
+    for i, batch in enumerate(dataloader):
+        real_images = batch[0].to(device)  # Extract the real images and move to GPU
+        batch_size = real_images.size(0)
+
+        # Adversarial ground truth
+        valid = torch.ones(batch_size, 1).to(device)
+        fake = torch.zeros(batch_size, 1).to(device)
+
+        # Training the Discriminator
+        optimizer_D.zero_grad()
+
+        # Discriminator loss for real images
+        real_loss = adversarial_loss(discriminator(real_images), valid)
+
+        # Generate a batch of fake images
+        z = torch.randn(batch_size, latent_dim, 1, 1).to(device)  # Reshape z
+        fake_images = generator(z)
+
+        # Discriminator loss for fake images
+        fake_loss = adversarial_loss(discriminator(fake_images.detach()), fake)
+
+        # Total Discriminator loss
+        d_loss = real_loss + fake_loss
+        d_loss.backward()
+        optimizer_D.step()
+
+        # Training the Generator
+        optimizer_G.zero_grad()
+
+        # Generator loss
+        g_loss = adversarial_loss(discriminator(fake_images), valid)
+        g_loss.backward()
+        optimizer_G.step()
+
+        # Append losses to lists
+        generator_losses.append(g_loss.item())
+        discriminator_losses.append(d_loss.item())
+
+        # Print progress
+        if i % 100 == 0:
+            print(
+                f"Epoch [{epoch}/{num_epochs}] Batch [{i}/{len(dataloader)}] "
+                f"D_loss: {d_loss.item():.4f} G_loss: {g_loss.item():.4f}"
+            )
+
+    # # Save generated images at the end of each epoch
+    # save_image(fake_images.view(fake_images.size(0), 3, 64, 64).to("cpu"), f"gan_images/epoch_{epoch}.png", normalize=True)
+
+# Save the trained models
+torch.save(generator.state_dict(), "generator.pth")
+torch.save(discriminator.state_dict(), "discriminator.pth")
+
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import DataLoader
+from torchvision import datasets, transforms
+import torchvision.utils as vutils
+import matplotlib.pyplot as plt
+
+# Define Device
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+print(device)
+
+# Latent Size
+latent_size = 128
+
+# Create the generator
+G = Generator(latent_size).to(device)
+
+# Load the trained model
+G.load_state_dict(torch.load('generator.pth'))
+G.eval()
+
+# Generate a batch of fake images
+noise = torch.randn(64, latent_size, 1, 1, device=device)
+fake_images = G(noise)
+
+# Save or display the images
+vutils.save_image(fake_images, 'synthetic_64images_30epoch_most_recent.png',normalize=True)
